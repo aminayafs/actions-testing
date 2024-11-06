@@ -1,0 +1,416 @@
+name: CI/CD Pipeline
+
+on:
+  workflow_dispatch: #workflow dispatch is for manual run from actions page
+  push: #on push to our release pipeline branches
+    branches:
+      - 'dev'
+      - 'release-*'
+      - 'hotfix-*'
+      - 'main'
+  pull_request: #on pull request  
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  determine-app-version:
+    name: Determine app version
+    runs-on: ubuntu-latest
+    outputs:
+      base-version: ${{ steps.determine-base-version.outputs.BASE_VERSION }}
+      build-number: ${{ steps.determine-build-number.outputs.BUILD_NUMBER }}
+      version-suffix: ${{ steps.determine-version-suffix.outputs.VERSION_SUFFIX }}
+      full-version: ${{ steps.determine-full-version.outputs.FULL_VERSION }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine base version
+        id: determine-base-version
+        run: |
+          BASE_VERSION=$(grep 'bundleVersion:' ./ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          
+          echo "BASE_VERSION=$BASE_VERSION" >> "$GITHUB_OUTPUT"
+          
+          echo "Base version: $BASE_VERSION"
+
+      - name: Determine build number
+        id: determine-build-number
+        run: |
+          BUILD_NUMBER="${{ github.run_number }}${{ github.run_attempt }}"
+          
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          
+          echo "Build number: $BUILD_NUMBER"
+
+      - name: Determine version suffix
+        id: determine-version-suffix
+        run: |
+          GITHUB_EVENT_NAME="${{ github.event_name }}"
+          
+          if [[ $GITHUB_EVENT_NAME == 'pull_request' ]]; then
+            GITHUB_REF="${{ github.base_ref }}"
+          else
+            GITHUB_REF="${{ github.ref_name }}"
+          fi
+          
+          if [[ $GITHUB_REF == 'main' ]]; then
+            VERSION_SUFFIX="+${{ steps.determine-build-number.outputs.BUILD_NUMBER }}"
+          elif [[ $GITHUB_REF =~ ^(release|hotfix)-.* ]]; then
+            VERSION_SUFFIX="-rc.${{ steps.determine-build-number.outputs.BUILD_NUMBER }}"
+          else
+            VERSION_SUFFIX="-dev.${{ steps.determine-build-number.outputs.BUILD_NUMBER }}"
+          fi
+          
+          echo "VERSION_SUFFIX=$VERSION_SUFFIX" >> "$GITHUB_OUTPUT"
+          
+          echo "Version suffix: $VERSION_SUFFIX"
+
+      - name: Determine full version
+        id: determine-full-version
+        run: |
+          FULL_VERSION="${{ steps.determine-base-version.outputs.BASE_VERSION }}${{ steps.determine-version-suffix.outputs.VERSION_SUFFIX }}"
+          
+          echo "FULL_VERSION=$FULL_VERSION" >> "$GITHUB_OUTPUT"
+          
+          echo "Full version: $FULL_VERSION"
+
+  run-unit-tests:
+    name: Run unit tests in ${{ matrix.test-mode }}
+    runs-on: ubuntu-latest-m
+    strategy:
+      fail-fast: false
+      matrix:
+        test-mode:
+          - PlayMode
+          - EditMode
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4.1.1
+        with:
+          path: Library/
+          key: Unity-Library-Tests-${{ matrix.test-mode }}-${{ runner.os }}-${{ hashFiles('Packages/**') }}-${{ hashFiles('ProjectSettings/**') }}-${{ hashFiles('Assets/**') }}
+          restore-keys: |
+            Unity-Library-Tests-${{ matrix.test-mode }}-${{ runner.os }}-${{ hashFiles('Packages/**') }}-${{ hashFiles('ProjectSettings/**') }}
+            Unity-Library-Tests-${{ matrix.test-mode }}-${{ runner.os }}-${{ hashFiles('Packages/**') }}
+            Unity-Library-Tests-${{ matrix.test-mode }}-${{ runner.os }}
+
+      - name: Cache UPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/upm-cache
+          key: upm-cache-${{ inputs.target-platform }}-${{ hashFiles('Packages/manifest.json', 'Packages/packages-lock.json', 'Packages/nuget-packages/NuGet.config', 'Packages/nuget-packages/package.json', 'Packages/nuget-packages/packages.config') }}
+          restore-keys: |
+            upm-cache-${{ inputs.target-platform }}-
+
+      - name: Setup .NET Core SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.x'
+
+      - name: Install NugetForUnity CLI tool
+        run: dotnet tool install --global NuGetForUnity.Cli
+
+      - name: Restore NugetForUnity packages
+        run: nugetforunity restore .
+
+      - name: Use the Buildalon Unity Action for Edit Mode Tests
+        uses: buildalon/unity-action@v1
+        if: always()
+        with:
+          editor-path: 'C:\Program Files\Unity\Hub\Editor\6000.0.25f1\Editor'
+          project-path: 'C:\Users\aminaya\Documents\GitHub\foresight-premier'
+          log-name: '${{ matrix.build-target }}-EditMode-Tests'
+          build-target: '${{ matrix.build-target }}'
+          args: '-quit -batchmode -nographics -runTests -testPlatform EditMode'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Test results for ${{ matrix.test-mode }}
+          path: ${{ steps.tests.outputs.artifactsPath }}
+
+  build-unity-project-windows:
+    name: Build Unity project - Windows
+    needs: [determine-app-version]
+    outputs:
+      build-artifact-name: ${{ steps.build-xcode-project.outputs.build-artifact-name }}
+      build-artifact-path: ${{ steps.build-xcode-project.outputs.build-artifact-path }}
+    runs-on: ubuntu-16-cores-64gb-ram-600gb-ssd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Build XCode project
+        id: build-xcode-project
+        uses: ./.github/actions/unity-build-project
+        with:
+          target-platform: StandaloneWindows
+          build-method: Builder.BuildWindows
+          build-folder: Windows
+          base-version: ${{ needs.determine-app-version.outputs.base-version }}
+          build-number: ${{ needs.determine-app-version.outputs.build-number }}
+          version-suffix: ${{ needs.determine-app-version.outputs.version-suffix }}
+          unity-license-server-url: ${{ vars.UNITY_LICENSE_SERVER_URL }}
+
+  build-unity-project-ios-simulator-sdk:
+    name: Build Unity project - iOS (Simulator SDK)
+    needs: [determine-app-version]
+    outputs:
+      build-artifact-name: ${{ steps.build-xcode-project.outputs.build-artifact-name }}
+      build-artifact-path: ${{ steps.build-xcode-project.outputs.build-artifact-path }}
+    runs-on: ubuntu-16-cores-64gb-ram-600gb-ssd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Build XCode project
+        id: build-xcode-project
+        uses: ./.github/actions/unity-build-project
+        with:
+          target-platform: iOS
+          build-method: Builder.BuildIOSSimulatorSDK
+          build-folder: iOSSimulatorSDK
+          base-version: ${{ needs.determine-app-version.outputs.base-version }}
+          build-number: ${{ needs.determine-app-version.outputs.build-number }}
+          version-suffix: ${{ needs.determine-app-version.outputs.version-suffix }}
+          unity-license-server-url: ${{ vars.UNITY_LICENSE_SERVER_URL }}
+
+  run-game-driver-tests-on-windows:
+    name: Run GameDriver tests on Windows
+    needs: [build-unity-project-windows]
+    runs-on: [self-hosted, Windows, azure, gpu, nv4as_v4]
+    env:
+      BUILD_NAME: Windows
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Unity Windows build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-unity-project-windows.outputs.build-artifact-name }}
+          path: ${{ needs.build-unity-project-windows.outputs.build-artifact-path }}
+
+      - name: Setup .NET Core SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.x'
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: dotnet restore --locked-mode GameDriverUnitTests/GameDriverUnitTests.sln
+
+      - name: Install NUnit.ConsoleRunner
+        run: nuget install NUnit.ConsoleRunner -Version 3.18.2 -DirectDownload -OutputDirectory .
+
+      - name: Build GameDriver tests
+        run: dotnet build GameDriverUnitTests/GameDriverUnitTests.sln -property:Configuration=Debug -property:platform="Any CPU"
+
+      - name: Run app
+        run: Start-Process -FilePath "${{ github.workspace }}\Builds\${{ env.BUILD_NAME }}\Foresight Premier.exe" -WindowStyle Maximized
+
+      - name: Run GameDriver tests
+        run: |
+          ./NUnit.ConsoleRunner.3.18.2/tools/nunit3-console.exe GameDriverUnitTests/bin/Debug/net6.0/GameDriverUnitTests.dll `
+            --testparam:Mode=standalone `
+            --testparam:executablePath=${{ github.workspace }}\Builds\${{ env.BUILD_NAME }}\Foresight Premier.exe `
+            --output=TestResult.xml
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GameDriver Test Results for Windows
+          path: ${{ github.workspace }}\TestResult.xml
+
+  run-game-driver-tests-on-ipad-simulator:
+    name: Run GameDriver tests on iPad Simulator
+    needs: [build-unity-project-ios-simulator-sdk]
+    runs-on: [self-hosted, macOS, gpu, ARM64]
+    env:
+      BUILD_NAME: iOSSimulatorSDK
+      IPAD_SIMULATOR_DEVICE_NAME: "iPad (10th generation)"
+    steps:
+      - name: "Add Homebrew's bin folder to $PATH"
+        run: |
+          echo "PATH=/opt/homebrew/bin:$PATH" >> "$GITHUB_ENV"         
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Unity iOS build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-unity-project-ios-simulator-sdk.outputs.build-artifact-name }}
+          path: ${{ needs.build-unity-project-ios-simulator-sdk.outputs.build-artifact-path }}
+
+      - name: Build XCode project
+        run: |
+          xcodebuild \
+            -project Builds/${{ env.BUILD_NAME }}/Unity-iPhone.xcodeproj \
+            -scheme Unity-iPhone \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPad (10th generation),OS=18.0' \
+            -derivedDataPath Builds/${{ env.BUILD_NAME }}/DerivedData \
+            build
+
+      - name: Setup .NET Core SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '6.x'
+
+      - name: Build GameDriver tests
+        run: dotnet build GameDriverUnitTests/GameDriverUnitTests.sln --configuration Debug
+
+      - name: Launch Simulator app
+        run: open -a Simulator
+
+      - name: Boot iPad simulator
+        run: xcrun simctl bootstatus "${{ env.IPAD_SIMULATOR_DEVICE_NAME }}" -b
+
+      - name: Launch app on iPad simulator
+        run: |
+          xcrun simctl install "${{ env.IPAD_SIMULATOR_DEVICE_NAME }}" Builds/${{ env.BUILD_NAME }}/DerivedData/Build/Products/ReleaseForRunning-iphonesimulator/ForesightPremier.app
+          xcrun simctl launch "${{ env.IPAD_SIMULATOR_DEVICE_NAME }}" com.foresightsports.premier
+
+      - name: Run GameDriver tests
+        run: dotnet test GameDriverUnitTests/GameDriverUnitTests.sln --logger "trx;LogFileName=TestResults.trx"
+        continue-on-error: true
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Test Results
+          path: '**/TestResults.trx'
+
+      - name: Close Simulator app
+        if: always()
+        run: xcrun simctl shutdown all
+
+  build-unity-project-ios-development-channel:
+    name: Build Unity project - iOS (Development Channel)
+    if: github.event_name != 'pull_request' && github.ref_name == 'dev'
+    needs: [determine-app-version]
+    outputs:
+      build-artifact-name: ${{ steps.build-xcode-project.outputs.build-artifact-name }}
+      build-artifact-path: ${{ steps.build-xcode-project.outputs.build-artifact-path }}
+    runs-on: ubuntu-16-cores-64gb-ram-600gb-ssd
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Build XCode project
+        id: build-xcode-project
+        uses: ./.github/actions/unity-build-project
+        with:
+          target-platform: iOS
+          build-method: Builder.BuildIOSDevelopmentChannel
+          build-folder: iOSDevelopmentChannel
+          base-version: ${{ needs.determine-app-version.outputs.base-version }}
+          build-number: ${{ needs.determine-app-version.outputs.build-number }}
+          version-suffix: ${{ needs.determine-app-version.outputs.version-suffix }}
+          unity-license-server-url: ${{ vars.UNITY_LICENSE_SERVER_URL }}
+  
+  deploy-ios-app-to-firebase-distribution-development:
+    name: Deploy iOS app to Firebase Distribution (Development)
+    if: github.event_name != 'pull_request' && github.ref_name == 'dev'
+    needs: [run-unit-tests, run-game-driver-tests-on-windows, run-game-driver-tests-on-ipad-simulator, build-unity-project-ios-development-channel]
+    runs-on: macos-latest-xlarge
+    env:
+      BUILD_NAME: iOSDevelopmentChannel
+      IPA_FILE_NAME: ForesightPremierDev.ipa
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Unity iOS build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-unity-project-ios-development-channel.outputs.build-artifact-name }}
+          path: ${{ needs.build-unity-project-ios-development-channel.outputs.build-artifact-path }}
+
+      - name: Setup XCode profiles
+        uses: ./.github/actions/xcode-setup-profiles
+        with:
+          XCODE_PROJECT_PATH: Builds/${{ env.BUILD_NAME }}/Unity-iPhone.xcodeproj
+          XCODE_TARGET: Unity-iPhone
+          XCODE_BUILD_CONFIGURATION: ReleaseForRunning
+          APPLE_APP_STORE_CONNECT_API_AUTH_KEY: ${{ secrets.GH_ACTIONS_APPLE_APP_STORE_CONNECT_API_AUTH_KEY }}
+          APPLE_APP_STORE_CONNECT_API_AUTH_KEY_ID: ${{ secrets.GH_ACTIONS_APPLE_APP_STORE_CONNECT_API_AUTH_KEY_ID }}
+          APPLE_APP_STORE_CONNECT_API_AUTH_KEY_ISSUER_ID: ${{ secrets.GH_ACTIONS_APPLE_APP_STORE_CONNECT_API_AUTH_KEY_ISSUER_ID }}
+          APPLE_APP_STORE_CONNECT_PROFILE_CERT: ${{ secrets.GH_ACTIONS_APPLE_APP_STORE_CONNECT_PROFILE_CERT }}
+
+      - name: Build iOS app archive
+        run: |
+          xcodebuild archive \
+            -project Builds/${{ env.BUILD_NAME }}/Unity-iPhone.xcodeproj \
+            -scheme Unity-iPhone \
+            -sdk iphoneos \
+            -destination generic/platform=iOS \
+            -derivedDataPath Builds/${{ env.BUILD_NAME }}/build/DerivedData \
+            -archivePath Builds/${{ env.BUILD_NAME }}/build/ForesightPremier.xcarchive
+
+      - name: Build iOS app IPA
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath Builds/${{ env.BUILD_NAME }}/build/ForesightPremier.xcarchive \
+            -exportOptionsPlist $HOME/export_options.plist \
+            -exportPath Builds/${{ env.BUILD_NAME }}/build/ipa
+
+      - name: Upload iOS app to Firebase Distribution (Development)
+        uses: nickwph/firebase-app-distribution-action@v1
+        with:
+          file: Builds/${{ env.BUILD_NAME }}/build/ipa/${{ env.IPA_FILE_NAME }}
+          app: ${{ vars.FIREBASE_APP_ID_IOS_DEVELOPMENT_CHANNEL }}
+          credentials: ${{ secrets.FIREBASE_APP_DISTRIBUTION_SERVICE_ACCOUNT_CREDENTIALS_FILE }}
+          groups: ${{ vars.FIREBASE_TESTER_GROUPS_IOS_DEVELOPMENT_CHANNEL }}
+
+      - name: Upload iOS build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS-Build-${{ env.BUILD_NAME }}
+          path: Builds/${{ env.BUILD_NAME }}
+
+  deploy-windows-app-to-release-channel-development:
+    name: Deploy Windows app to Release Channel (Development)
+    if: github.event_name != 'pull_request' && github.ref_name == 'dev'
+    needs: [run-unit-tests, run-game-driver-tests-on-windows, run-game-driver-tests-on-ipad-simulator, build-unity-project-windows]
+    runs-on: ubuntu-latest
+    env:
+      BUILD_NAME: Windows
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Download Windows app build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-unity-project-windows.outputs.build-artifact-name }}
+          path: ${{ needs.build-unity-project-windows.outputs.build-artifact-path }}
