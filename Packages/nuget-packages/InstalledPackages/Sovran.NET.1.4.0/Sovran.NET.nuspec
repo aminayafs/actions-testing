@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>Sovran.NET</id>
+    <version>1.4.0</version>
+    <authors>Segment, Inc</authors>
+    <license type="expression">MIT</license>
+    <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
+    <description>Small, Efficient, Easy. State Management for Kotlin.</description>
+    <repository type="git" url="https://github.com/segmentio/Sovran.NET" />
+    <dependencies>
+      <group targetFramework=".NETStandard1.3">
+        <dependency id="Coroutine.NET" version="1.4.0" exclude="Build,Analyzers" />
+        <dependency id="NETStandard.Library" version="1.6.1" exclude="Build,Analyzers" />
+      </group>
+      <group targetFramework=".NETStandard2.0">
+        <dependency id="Coroutine.NET" version="1.4.0" exclude="Build,Analyzers" />
+      </group>
+    </dependencies>
+  </metadata>
+</package>
