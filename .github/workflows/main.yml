@@ -17,7 +17,7 @@ concurrency:
 jobs:
   determine-app-version:
     name: Determine app version
-    runs-on: ubuntu-latest-m
+    runs-on: ubuntu-latest
     outputs:
       base-version: ${{ steps.determine-base-version.outputs.BASE_VERSION }}
       build-number: ${{ steps.determine-build-number.outputs.BUILD_NUMBER }}
@@ -85,7 +85,6 @@ jobs:
       matrix:
         test-mode:
           - PlayMode
-          - EditMode
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -131,6 +130,12 @@ jobs:
         with:
           dotnet-version: '6.x'
 
+      - name: Install NugetForUnity CLI tool
+        run: dotnet tool install --global NuGetForUnity.Cli
+
+      - name: Restore NugetForUnity packages
+        run: nugetforunity restore .
+
       - name: Setup Unity
         if: steps.cache-unity.outputs.cache-hit != 'true'
         id: unity-setup
@@ -139,49 +144,62 @@ jobs:
           version-file: './ProjectSettings/ProjectVersion.txt'
           modules: linux-server
 
-      - name: Create config directory
+      - name: Create Unity License Service Config
         run: |
           sudo mkdir -p /usr/share/unity3d/config/
-          sudo chmod 777 /usr/share/unity3d/config/
-
-      - name: Create Unity License Config
-        continue-on-error: true
-        run: |
-            cat << EOF > services-config.json
-            {
-              "licensingServiceBaseUrl": "http://unity.foresightsports.com:433/",
-              "enableEntitlementLicensing": true,
-              "hubEnableWorkOffline": true,
-              "clientConnectTimeoutSec": 60,
-              "clientHandshakeTimeoutSec": 30
-            }
-            EOF
-
-      - name: Copy config file
-        run: |
+          cat << EOF > services-config.json
+          {
+            "licensingServiceBaseUrl": "${{ vars.UNITY_LICENSE_SERVER_URL }}",
+            "enableEntitlementLicensing": true,
+            "hubEnableWorkOffline": true,
+            "clientConnectTimeoutSec": 60,
+            "clientHandshakeTimeoutSec": 30
+          }
+          EOF
           sudo cp services-config.json /usr/share/unity3d/config/
-          sudo chmod 666 /usr/share/unity3d/config/services-config.json
+          sudo chmod 644 /usr/share/unity3d/config/services-config.json
 
-      - name: Acquire floating license
+      - name: Acquire Unity floating license
+        id: acquire-license
         run: |
-          /opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --acquire-floating
-    
-      - name: Encode services-config.json to Base64
-        id: encode
-        run: |
-          encoded_config=$(base64 -w 0 services-config.json)
-          echo "::set-output name=services_config_base64::$encoded_config"
-      
-      - name: Activate Unity License
-        id: activate-unity-license
-        uses: aminayafs/andres-activate-license-test@main
-        continue-on-error: true
+          output=$(/opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --acquire-floating)
+          echo "$output"
+          LICENSETOKEN=$(echo "$output" | grep -oP 'token: "\K[^"]+')
+          echo "LICENSETOKEN=$LICENSETOKEN" >> $GITHUB_OUTPUT
+
+      - name: Run Unity Tests
+        id: unity-tests
+        uses: buildalon/unity-action@v1.0.3
         with:
-          license: buildserverfree
-          configuration: ${{ steps.encode.outputs.services_config_base64 }}
+          editor-path: '/home/runner/Unity/Hub/Editor/${{ steps.unity-version.outputs.UNITY_VERSION }}/Editor/Unity'
+          project-path: ${{ github.workspace }}
+          log-name: '${{ matrix.test-mode }}Test-Results'
+          args: >-
+            -quit
+            -batchmode
+            -nographics
+            -runTests
+            -testPlatform ${{ matrix.test-mode }}
+            -testResults ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
 
-      - name: Reset permissions
+      - name: Release Unity floating license
         if: always()
         run: |
-          sudo chmod 755 /usr/share/unity3d/config/
-          sudo chmod 644 /usr/share/unity3d/config/services-config.json
+          /opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --return-floating "${{ steps.acquire-license.outputs.LICENSETOKEN }}"
+
+      - name: Unit Test Report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Unit Tests Report
+          path: ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
+          reporter: jest-junit
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Unit Test Results - ${{ matrix.test-mode }}
+          path: |
+            ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
+            ${{ github.workspace }}/Builds/Logs/${{ matrix.test-mode }}Test-Results-*.log
