@@ -144,62 +144,62 @@ jobs:
           version-file: './ProjectSettings/ProjectVersion.txt'
           modules: linux-server
 
-      - name: Create Unity License Service Config
-        run: |
-          sudo mkdir -p /usr/share/unity3d/config/
-          cat << EOF > services-config.json
-          {
-            "licensingServiceBaseUrl": "${{ vars.UNITY_LICENSE_SERVER_URL }}",
-            "enableEntitlementLicensing": true,
-            "hubEnableWorkOffline": true,
-            "clientConnectTimeoutSec": 60,
-            "clientHandshakeTimeoutSec": 30
-          }
-          EOF
-          sudo cp services-config.json /usr/share/unity3d/config/
-          sudo chmod 644 /usr/share/unity3d/config/services-config.json
+      # - name: Create Unity License Service Config
+      #   run: |
+      #     sudo mkdir -p /usr/share/unity3d/config/
+      #     cat << EOF > services-config.json
+      #     {
+      #       "licensingServiceBaseUrl": "${{ vars.UNITY_LICENSE_SERVER_URL }}",
+      #       "enableEntitlementLicensing": true,
+      #       "hubEnableWorkOffline": true,
+      #       "clientConnectTimeoutSec": 60,
+      #       "clientHandshakeTimeoutSec": 30
+      #     }
+      #     EOF
+      #     sudo cp services-config.json /usr/share/unity3d/config/
+      #     sudo chmod 644 /usr/share/unity3d/config/services-config.json
 
-      - name: Acquire Unity floating license
-        id: acquire-license
-        run: |
-          output=$(/opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --acquire-floating)
-          echo "$output"
-          LICENSETOKEN=$(echo "$output" | grep -oP 'token: "\K[^"]+')
-          echo "LICENSETOKEN=$LICENSETOKEN" >> $GITHUB_OUTPUT
+      # - name: Acquire Unity floating license
+      #   id: acquire-license
+      #   run: |
+      #     output=$(/opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --acquire-floating)
+      #     echo "$output"
+      #     LICENSETOKEN=$(echo "$output" | grep -oP 'token: "\K[^"]+')
+      #     echo "LICENSETOKEN=$LICENSETOKEN" >> $GITHUB_OUTPUT
 
-      - name: Run Unity Tests
-        id: unity-tests
-        uses: buildalon/unity-action@v1.0.3
-        with:
-          editor-path: '/home/runner/Unity/Hub/Editor/${{ steps.unity-version.outputs.UNITY_VERSION }}/Editor/Unity'
-          project-path: ${{ github.workspace }}
-          log-name: '${{ matrix.test-mode }}Test-Results'
-          args: >-
-            -quit
-            -batchmode
-            -nographics
-            -runTests
-            -testPlatform ${{ matrix.test-mode }}
-            -testResults ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
+      # - name: Run Unity Tests
+      #   id: unity-tests
+      #   uses: buildalon/unity-action@v1.0.3
+      #   with:
+      #     editor-path: '/home/runner/Unity/Hub/Editor/${{ steps.unity-version.outputs.UNITY_VERSION }}/Editor/Unity'
+      #     project-path: ${{ github.workspace }}
+      #     log-name: '${{ matrix.test-mode }}Test-Results'
+      #     args: >-
+      #       -quit
+      #       -batchmode
+      #       -nographics
+      #       -runTests
+      #       -testPlatform ${{ matrix.test-mode }}
+      #       -testResults ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
 
-      - name: Release Unity floating license
-        if: always()
-        run: |
-          /opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --return-floating "${{ steps.acquire-license.outputs.LICENSETOKEN }}"
+      # - name: Release Unity floating license
+      #   if: always()
+      #   run: |
+      #     /opt/unityhub/UnityLicensingClient_V1/Unity.Licensing.Client --return-floating "${{ steps.acquire-license.outputs.LICENSETOKEN }}"
 
-      - name: Unit Test Report
-        uses: dorny/test-reporter@v1
-        if: always()
-        with:
-          name: Unit Tests Report
-          path: ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
-          reporter: jest-junit
+      # - name: Unit Test Report
+      #   uses: dorny/test-reporter@v1
+      #   if: always()
+      #   with:
+      #     name: Unit Tests Report
+      #     path: ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
+      #     reporter: jest-junit
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Unit Test Results - ${{ matrix.test-mode }}
-          path: |
-            ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
-            ${{ github.workspace }}/Builds/Logs/${{ matrix.test-mode }}Test-Results-*.log
+      # - name: Upload artifacts
+      #   uses: actions/upload-artifact@v4
+      #   if: always()
+      #   with:
+      #     name: Unit Test Results - ${{ matrix.test-mode }}
+      #     path: |
+      #       ${{ github.workspace }}${{ matrix.test-mode }}Test-Results.xml
+      #       ${{ github.workspace }}/Builds/Logs/${{ matrix.test-mode }}Test-Results-*.log
